@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Linq;
 using System.Threading.Tasks;
 using CoreAnimation;
 using CoreGraphics;
@@ -32,17 +33,40 @@ namespace Microsoft.Maui.DeviceTests
 			throw new NotImplementedException();
 		}
 
-		public static Task WaitForFocused(this UIView view, int timeout = 1000)
+		public static async Task WaitForFocused(this UIView view, int timeout = 1000)
 		{
-			throw new NotImplementedException();
+			if (!view.IsFocused())
+			{
+				await Wait(() => view.IsFocused(), timeout);
+			}
+
+			Assert.True(view.IsFocused());
 		}
+
+		public static async Task WaitForUnFocused(this UIView view, int timeout = 1000)
+		{
+			if (view.IsFocused())
+			{
+				await Wait(() => view.IsFocused(), timeout);
+			}
+
+			Assert.False(view.IsFocused());
+		}
+
+		static bool IsFocused(this UIView view) => view.Focused || view.IsFirstResponder;
 
 		public static Task FocusView(this UIView view, int timeout = 1000)
 		{
-			throw new NotImplementedException();
+			view.Focus(new FocusRequest(false));
+			return WaitForFocused(view, timeout);
 		}
 
 		public static Task ShowKeyboardForView(this UIView view, int timeout = 1000)
+		{
+			throw new NotImplementedException();
+		}
+
+		public static Task HideKeyboardForView(this UIView view, int timeout = 1000)
 		{
 			throw new NotImplementedException();
 		}
@@ -108,7 +132,7 @@ namespace Microsoft.Maui.DeviceTests
 			return result;
 		}
 
-		static UIView FindContentView()
+		public static UIViewController FindContentViewController()
 		{
 			if (GetKeyWindow(UIApplication.SharedApplication) is not UIWindow window)
 			{
@@ -120,8 +144,11 @@ namespace Microsoft.Maui.DeviceTests
 				throw new InvalidOperationException("Could not attach view - unable to find RootViewController");
 			}
 
-			while (viewController.PresentedViewController != null)
+			while (viewController.PresentedViewController is not null)
 			{
+				if (viewController is ModalWrapper || viewController.PresentedViewController is ModalWrapper)
+					throw new InvalidOperationException("Modal Window Is Still Present");
+
 				viewController = viewController.PresentedViewController;
 			}
 
@@ -135,7 +162,12 @@ namespace Microsoft.Maui.DeviceTests
 				viewController = nav.VisibleViewController;
 			}
 
-			var currentView = viewController.View;
+			return viewController;
+		}
+
+		public static UIView FindContentView()
+		{
+			var currentView = FindContentViewController().View;
 
 			if (currentView == null)
 			{
@@ -295,14 +327,31 @@ namespace Microsoft.Maui.DeviceTests
 			return bitmap.AssertContainsColor(expectedColor);
 		}
 
+		public static async Task<UIImage> AssertDoesNotContainColor(this UIView view, UIColor unexpectedColor)
+		{
+			var bitmap = await view.ToBitmap();
+			return bitmap.AssertDoesNotContainColor(unexpectedColor);
+		}
+
 		public static Task<UIImage> AssertContainsColor(this UIView view, Microsoft.Maui.Graphics.Color expectedColor) =>
 			AssertContainsColor(view, expectedColor.ToPlatform());
 
-		public static UIImage AssertContainsColor(this UIImage bitmap, UIColor expectedColor)
+		public static Task<UIImage> AssertDoesNotContainColor(this UIView view, Microsoft.Maui.Graphics.Color unexpectedColor) =>
+			AssertDoesNotContainColor(view, unexpectedColor.ToPlatform());
+
+		public static Task<UIImage> AssertContainsColor(this UIImage image, Graphics.Color expectedColor, Func<Graphics.RectF, Graphics.RectF>? withinRectModifier = null)
+			=> Task.FromResult(image.AssertContainsColor(expectedColor.ToPlatform(), withinRectModifier));
+
+		public static UIImage AssertContainsColor(this UIImage bitmap, UIColor expectedColor, Func<Graphics.RectF, Graphics.RectF>? withinRectModifier = null)
 		{
-			for (int x = 0; x < bitmap.Size.Width; x++)
+			var imageRect = new Graphics.RectF(0, 0, (float)bitmap.Size.Width.Value, (float)bitmap.Size.Height.Value);
+
+			if (withinRectModifier is not null)
+				imageRect = withinRectModifier.Invoke(imageRect);
+
+			for (int x = (int)imageRect.X; x < (int)imageRect.Width; x++)
 			{
-				for (int y = 0; y < bitmap.Size.Height; y++)
+				for (int y = (int)imageRect.Y; y < (int)imageRect.Height; y++)
 				{
 					if (ColorComparison.ARGBEquivalent(bitmap.ColorAtPoint(x, y), expectedColor))
 					{
@@ -311,9 +360,30 @@ namespace Microsoft.Maui.DeviceTests
 				}
 			}
 
-			Assert.True(false, CreateColorError(bitmap, $"Color {expectedColor} not found."));
+			throw new XunitException($"Color {expectedColor} not found.");
+		}
+
+		public static UIImage AssertDoesNotContainColor(this UIImage bitmap, UIColor unexpectedColor, Func<Graphics.RectF, Graphics.RectF>? withinRectModifier = null)
+		{
+			var imageRect = new Graphics.RectF(0, 0, (float)bitmap.Size.Width.Value, (float)bitmap.Size.Height.Value);
+
+			if (withinRectModifier is not null)
+				imageRect = withinRectModifier.Invoke(imageRect);
+
+			for (int x = (int)imageRect.X; x < (int)imageRect.Width; x++)
+			{
+				for (int y = (int)imageRect.Y; y < (int)imageRect.Height; y++)
+				{
+					if (ColorComparison.ARGBEquivalent(bitmap.ColorAtPoint(x, y), unexpectedColor))
+					{
+						throw new XunitException($"Color {unexpectedColor} was found at point {x}, {y}.");
+					}
+				}
+			}
+
 			return bitmap;
 		}
+
 
 		public static Task AssertEqualAsync(this UIImage bitmap, UIImage other)
 		{
@@ -527,6 +597,63 @@ namespace Microsoft.Maui.DeviceTests
 			}
 
 			return platformView;
+		}
+
+		static UIView GetBackButton(this UINavigationBar uINavigationBar)
+		{
+			var item = uINavigationBar.FindDescendantView<UIView>(result =>
+			{
+				return result.Class.Name?.Contains("UIButtonBarButton", StringComparison.OrdinalIgnoreCase) == true;
+			});
+
+			return item ?? throw new Exception("Unable to locate back button view");
+		}
+
+		public static void TapBackButton(this UINavigationBar uINavigationBar)
+		{
+			var item = uINavigationBar.GetBackButton();
+
+			var recognizer = item?.GestureRecognizers?.OfType<UITapGestureRecognizer>()?.FirstOrDefault();
+			if (recognizer is null && item is UIControl control)
+			{
+				control.SendActionForControlEvents(UIControlEvent.TouchUpInside);
+			}
+			else
+			{
+				_ = recognizer ?? throw new Exception("Unable to figure out how to tap back button");
+				recognizer.State = UIGestureRecognizerState.Ended;
+			}
+		}
+
+		public static string? GetToolbarTitle(this UINavigationBar uINavigationBar)
+		{
+			var item = uINavigationBar.FindDescendantView<UIView>(result =>
+			{
+				return result.Class.Name?.Contains("UINavigationBarTitleControl", StringComparison.OrdinalIgnoreCase) == true;
+			});
+
+			//Pre iOS 15
+			item = item ?? uINavigationBar.FindDescendantView<UIView>(result =>
+			{
+				return result.Class.Name?.Contains("UINavigationBarContentView", StringComparison.OrdinalIgnoreCase) == true;
+			});
+
+			_ = item ?? throw new Exception("Unable to locate TitleBar Control");
+
+			var titleLabel = item.FindDescendantView<UILabel>();
+
+			_ = item ?? throw new Exception("Unable to locate UILabel Inside UINavigationBar");
+			return titleLabel?.Text;
+		}
+
+		public static string? GetBackButtonText(this UINavigationBar uINavigationBar)
+		{
+			var item = uINavigationBar.GetBackButton();
+
+			var titleLabel = item.FindDescendantView<UILabel>();
+
+			_ = item ?? throw new Exception("Unable to locate BackButton UILabel Inside UINavigationBar");
+			return titleLabel?.Text;
 		}
 	}
 }

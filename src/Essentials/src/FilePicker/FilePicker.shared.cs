@@ -22,7 +22,7 @@ namespace Microsoft.Maui.Storage
 		/// <returns>File picking result object, or <see langword="null"/> if picking was cancelled by the user.</returns>
 		/// <remarks>
 		/// File types can be specified in order to limit files that can be selected, using a
-        /// <see cref="PickOptions"/> object. Note that this method may re-throw platform specific exceptions that
+		/// <see cref="PickOptions"/> object. Note that this method may re-throw platform specific exceptions that
 		/// occurred during file picking. When calling <see cref="PickAsync(PickOptions?)"/> again while showing a file
 		/// picker, the <see cref="Task"/> object that was returned from the first call is cancelled. Be sure to
 		/// also handle the <see cref="TaskCanceledException"/> in this case.
@@ -133,6 +133,9 @@ namespace Microsoft.Maui.Storage
 
 		readonly IDictionary<DevicePlatform, IEnumerable<string>> fileTypes;
 
+		/// <summary>
+		/// Initializes a new instance of the <see cref="FilePickerFileType"/> class.
+		/// </summary>
 		protected FilePickerFileType() =>
 			fileTypes = new Dictionary<DevicePlatform, IEnumerable<string>>();
 
@@ -154,6 +157,10 @@ namespace Microsoft.Maui.Storage
 		/// <exception cref="PlatformNotSupportedException">Thrown if the current platform does not have any file types configured.</exception>
 		public IEnumerable<string> Value => GetPlatformFileType(DeviceInfo.Current.Platform);
 
+		/// <summary>
+		/// Gets the configured allowed file types that can be picked by the user for the current platform.
+		/// </summary>
+		/// <exception cref="PlatformNotSupportedException">Thrown if the current platform does not have any file types configured.</exception>
 		protected virtual IEnumerable<string> GetPlatformFileType(DevicePlatform platform)
 		{
 			if (fileTypes.TryGetValue(platform, out var type))

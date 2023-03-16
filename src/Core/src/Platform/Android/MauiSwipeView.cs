@@ -50,7 +50,10 @@ namespace Microsoft.Maui.Platform
 			_context = context;
 
 			_swipeItems = new Dictionary<ISwipeItem, object>();
-			this.SetClipToOutline(true);
+
+			this.SetClipToOutline(Element?.Shadow is not null);
+			SetClipChildren(false);
+			SetClipToPadding(false);
 
 			_density = context.GetActivity()?.Resources?.DisplayMetrics?.Density ?? 0;
 			Control = new AView(_context);
@@ -223,8 +226,11 @@ namespace Microsoft.Maui.Platform
 		{
 			if (_contentView != null)
 			{
-				_contentView.RemoveFromParent();
-				_contentView.Dispose();
+				if (!_contentView.IsDisposed())
+				{
+					_contentView.RemoveFromParent();
+					_contentView.Dispose();
+				}
 				_contentView = null;
 			}
 
@@ -234,6 +240,7 @@ namespace Microsoft.Maui.Platform
 			else
 				_contentView = CreateEmptyContent();
 
+			_contentView.RemoveFromParent();
 			AddView(_contentView);
 		}
 

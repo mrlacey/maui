@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using System.Threading;
@@ -98,16 +99,6 @@ namespace Microsoft.Maui.DeviceTests
 			});
 		}
 
-		protected Task CreateHandlerAndAddToWindow<THandler>(IElement view, Action<THandler> action)
-			where THandler : class, IElementHandler
-		{
-			return CreateHandlerAndAddToWindow<THandler>(view, handler =>
-			{
-				action(handler);
-				return Task.CompletedTask;
-			});
-		}
-
 		static SemaphoreSlim _takeOverMainContentSempahore = new SemaphoreSlim(1);
 		protected Task CreateHandlerAndAddToWindow<THandler>(IElement view, Func<THandler, Task> action, IMauiContext mauiContext = null)
 			where THandler : class, IElementHandler
@@ -149,10 +140,13 @@ namespace Microsoft.Maui.DeviceTests
 					{
 						IView content = window.Content;
 
+						if (window is Window w && w.Navigation.ModalStack.Count > 0)
+							content = w.Navigation.ModalStack.Last();
+
 						if (content is IPageContainer<Page> pc)
 						{
 							content = pc.CurrentPage;
-							if (content == null)
+							if (content is null)
 							{
 								// This is mainly a timing issue with Shell.
 								// Basically the `CurrentPage` on Shell isn't initialized until it's
@@ -168,6 +162,17 @@ namespace Microsoft.Maui.DeviceTests
 						}
 
 						await OnLoadedAsync(content as VisualElement);
+
+						if (window is Window controlsWindow)
+						{
+							if (!controlsWindow.IsActivated)
+								window.Activated();
+						}
+						else
+						{
+							controlsWindow = null;
+							window.Activated();
+						}
 #if WINDOWS
 						await Task.Delay(10);
 #endif
@@ -179,6 +184,16 @@ namespace Microsoft.Maui.DeviceTests
 							await action((THandler)cp.Content.Handler);
 						else
 							throw new Exception($"I can't work with {typeof(THandler)}");
+
+
+						bool isActivated = controlsWindow?.IsActivated ?? false;
+						bool isDestroyed = controlsWindow?.IsDestroyed ?? false;
+
+						if (isActivated)
+							window.Deactivated();
+
+						if (!isDestroyed)
+							window.Destroying();
 					}, mauiContext);
 				}
 				finally
@@ -272,63 +287,83 @@ namespace Microsoft.Maui.DeviceTests
 			Assert.Equal(expectedSetValue, nativeVal);
 		}
 
-		protected void OnLoaded(VisualElement frameworkElement, Action action)
+		protected Task OnLoadedAsync(VisualElement frameworkElement, TimeSpan? timeOut = null)
 		{
-			if (frameworkElement.IsLoaded)
+			timeOut = timeOut ?? TimeSpan.FromSeconds(2);
+			var source = new TaskCompletionSource();
+			if (frameworkElement.IsLoaded && frameworkElement.IsLoadedOnPlatform())
 			{
-				action();
-				return;
+				source.TrySetResult();
+			}
+			else
+			{
+				EventHandler loaded = null;
+
+				loaded = (_, __) =>
+				{
+					if (loaded is not null)
+						frameworkElement.Loaded -= loaded;
+
+					source.TrySetResult();
+				};
+
+				frameworkElement.Loaded += loaded;
 			}
 
-			EventHandler loaded = null;
-
-			loaded = (_, __) =>
-			{
-				if (loaded != null)
-					frameworkElement.Loaded -= loaded;
-
-				action();
-			};
-
-			frameworkElement.Loaded += loaded;
-		}
-
-
-		protected void OnUnloaded(VisualElement frameworkElement, Action action)
-		{
-			if (!frameworkElement.IsLoaded)
-			{
-				action();
-				return;
-			}
-
-			EventHandler unloaded = null;
-
-			unloaded = (_, __) =>
-			{
-				if (unloaded != null)
-					frameworkElement.Unloaded -= unloaded;
-
-				action();
-			};
-
-			frameworkElement.Unloaded += unloaded;
+			return HandleLoadedUnloadedIssue(source.Task, timeOut.Value, () => frameworkElement.IsLoaded && frameworkElement.IsLoadedOnPlatform());
 		}
 
 		protected Task OnUnloadedAsync(VisualElement frameworkElement, TimeSpan? timeOut = null)
 		{
 			timeOut = timeOut ?? TimeSpan.FromSeconds(2);
-			TaskCompletionSource<object> taskCompletionSource = new TaskCompletionSource<object>();
-			OnUnloaded(frameworkElement, () => taskCompletionSource.SetResult(true));
-			return taskCompletionSource.Task.WaitAsync(timeOut.Value);
+			var source = new TaskCompletionSource();
+			if (!frameworkElement.IsLoaded && !frameworkElement.IsLoadedOnPlatform())
+			{
+				source.TrySetResult();
+			}
+			// in the xplat code we switch Loaded to Unloaded if the window property is removed.
+			// This will happen before the the control has been unloaded at the platform level.
+			// This is most likely a bug.
+			else if (frameworkElement.IsLoadedOnPlatform())
+			{
+				frameworkElement.OnUnloaded(() => source.TrySetResult());
+			}
+			else
+			{
+				EventHandler unloaded = null;
+
+				unloaded = (_, __) =>
+				{
+					if (unloaded is not null)
+						frameworkElement.Unloaded -= unloaded;
+
+					source.TrySetResult();
+				};
+
+				frameworkElement.Unloaded += unloaded;
+			}
+
+			return HandleLoadedUnloadedIssue(source.Task, timeOut.Value, () => !frameworkElement.IsLoaded && !frameworkElement.IsLoadedOnPlatform());
 		}
 
-		protected Task OnLoadedAsync(VisualElement frameworkElement, TimeSpan? timeOut = null)
+		// Modal Page's appear to currently not fire loaded/unloaded
+		async Task HandleLoadedUnloadedIssue(Task task, TimeSpan timeOut, Func<bool> isConditionValid)
 		{
-			timeOut = timeOut ?? TimeSpan.FromSeconds(2);
-			TaskCompletionSource<object> taskCompletionSource = new TaskCompletionSource<object>();
-			OnLoaded(frameworkElement, () => taskCompletionSource.SetResult(true));
-			return taskCompletionSource.Task.WaitAsync(timeOut.Value);
+			try
+			{
+				await task.WaitAsync(timeOut);
+			}
+			catch (TimeoutException)
+			{
+				if (isConditionValid())
+				{
+					return;
+				}
+				else
+				{
+					throw;
+				}
+			}
 		}
 
 		protected async Task OnNavigatedToAsync(Page page, TimeSpan? timeOut = null)
@@ -336,7 +371,16 @@ namespace Microsoft.Maui.DeviceTests
 			await OnLoadedAsync(page, timeOut);
 
 			if (page.HasNavigatedTo)
+			{
+				// TabbedPage fires OnNavigated earlier than it should
+				if (page.Parent is TabbedPage)
+					await Task.Delay(10);
+
+				if (page is IPageContainer<Page> pc)
+					await OnNavigatedToAsync(pc.CurrentPage);
+
 				return;
+			}
 
 			timeOut = timeOut ?? TimeSpan.FromSeconds(2);
 			TaskCompletionSource<object> taskCompletionSource = new TaskCompletionSource<object>();
@@ -344,6 +388,11 @@ namespace Microsoft.Maui.DeviceTests
 			page.NavigatedTo += NavigatedTo;
 
 			await taskCompletionSource.Task.WaitAsync(timeOut.Value);
+
+			// TabbedPage fires OnNavigated earlier than it should
+			if (page.Parent is TabbedPage)
+				await Task.Delay(10);
+
 			void NavigatedTo(object sender, NavigatedToEventArgs e)
 			{
 				taskCompletionSource.SetResult(true);
@@ -393,11 +442,34 @@ namespace Microsoft.Maui.DeviceTests
 						.Window
 						.GetVisualTreeDescendants()
 						.OfType<IToolbarElement>()
-						.SingleOrDefault(x => x.Toolbar != null)
+						.SingleOrDefault(x => x.Toolbar is not null)
 						?.Toolbar;
 		}
 
 		protected Task ValidateHasColor<THandler>(IView view, Color color, Action action = null) =>
 			ValidateHasColor(view, color, typeof(THandler), action);
+
+		protected static void MockAccessibilityExpectations(View view)
+		{
+#if IOS || MACCATALYST
+			if (UIKit.UIAccessibility.IsVoiceOverRunning)
+				return;
+
+			var mapperOverride = view.GetRendererOverrides<IView>();
+
+			mapperOverride.ModifyMapping(AutomationProperties.IsInAccessibleTreeProperty.PropertyName, (handler, virtualView, action) =>
+			{
+				if (virtualView is ILabel)
+				{
+					// accessibility for UILabel depends on if the text is set or not
+					// so we want to make sure text has propagated to the platform view
+					// before mocking accessibility expectations
+					handler.UpdateValue(nameof(ILabel.Text));
+				}
+				(handler.PlatformView as UIKit.UIView)?.SetupAccessibilityExpectationIfVoiceOverIsOff();
+				(mapperOverride as PropertyMapper).Chained[0]!.UpdateProperty(handler, view, nameof(AutomationProperties.IsInAccessibleTreeProperty));
+			});
+#endif
+		}
 	}
 }

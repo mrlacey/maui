@@ -1,7 +1,9 @@
+#nullable disable
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
+using System.Runtime.InteropServices.ComTypes;
 using Microsoft.Maui.Controls.Internals;
 using Microsoft.Maui.Controls.Shapes;
 //using Microsoft.Maui.Controls.Shapes;
@@ -23,9 +25,11 @@ namespace Microsoft.Maui.Controls
 		/// <include file="../../docs/Microsoft.Maui.Controls/VisualElement.xml" path="//Member[@MemberName='InputTransparentProperty']/Docs/*" />
 		public static readonly BindableProperty InputTransparentProperty = BindableProperty.Create("InputTransparent", typeof(bool), typeof(VisualElement), default(bool));
 
+		bool _isEnabledExplicit = (bool)IsEnabledProperty.DefaultValue;
+
 		/// <include file="../../docs/Microsoft.Maui.Controls/VisualElement.xml" path="//Member[@MemberName='IsEnabledProperty']/Docs/*" />
 		public static readonly BindableProperty IsEnabledProperty = BindableProperty.Create("IsEnabled", typeof(bool),
-			typeof(VisualElement), true, propertyChanged: OnIsEnabledPropertyChanged);
+			typeof(VisualElement), true, propertyChanged: OnIsEnabledPropertyChanged, coerceValue: CoerceIsEnabledProperty);
 
 		static readonly BindablePropertyKey XPropertyKey = BindableProperty.CreateReadOnly("X", typeof(double), typeof(VisualElement), default(double));
 
@@ -96,34 +100,61 @@ namespace Microsoft.Maui.Controls
 
 		void NotifyClipChanges()
 		{
-			if (Clip != null)
+			var clip = Clip;
+			if (clip != null)
 			{
-				Clip.PropertyChanged += OnClipChanged;
-
-				if (Clip is GeometryGroup geometryGroup)
-					geometryGroup.InvalidateGeometryRequested += InvalidateGeometryRequested;
+				var proxy = _clipProxy ??= new();
+				proxy.Subscribe(clip, (sender, e) => OnPropertyChanged(nameof(Clip)));
 			}
 		}
 
 		void StopNotifyingClipChanges()
 		{
-			if (Clip != null)
+			_clipProxy?.Unsubscribe();
+		}
+
+		class WeakClipChangedProxy : WeakEventProxy<Geometry, EventHandler>
+		{
+			void OnClipChanged(object sender, EventArgs e)
 			{
-				Clip.PropertyChanged -= OnClipChanged;
-
-				if (Clip is GeometryGroup geometryGroup)
-					geometryGroup.InvalidateGeometryRequested -= InvalidateGeometryRequested;
+				if (TryGetHandler(out var handler))
+				{
+					handler(sender, e);
+				}
+				else
+				{
+					Unsubscribe();
+				}
 			}
-		}
 
-		void OnClipChanged(object sender, PropertyChangedEventArgs e)
-		{
-			OnPropertyChanged(nameof(Clip));
-		}
+			public override void Subscribe(Geometry source, EventHandler handler)
+			{
+				if (TryGetSource(out var s))
+				{
+					s.PropertyChanged -= OnClipChanged;
 
-		void InvalidateGeometryRequested(object sender, EventArgs e)
-		{
-			OnPropertyChanged(nameof(Clip));
+					if (s is GeometryGroup g)
+						g.InvalidateGeometryRequested -= OnClipChanged;
+				}
+
+				source.PropertyChanged += OnClipChanged;
+				if (source is GeometryGroup geometryGroup)
+					geometryGroup.InvalidateGeometryRequested += OnClipChanged;
+
+				base.Subscribe(source, handler);
+			}
+
+			public override void Unsubscribe()
+			{
+				if (TryGetSource(out var s))
+				{
+					s.PropertyChanged -= OnClipChanged;
+
+					if (s is GeometryGroup g)
+						g.InvalidateGeometryRequested -= OnClipChanged;
+				}
+				base.Unsubscribe();
+			}
 		}
 
 		/// <include file="../../docs/Microsoft.Maui.Controls/VisualElement.xml" path="//Member[@MemberName='VisualProperty']/Docs/*" />
@@ -174,10 +205,12 @@ namespace Microsoft.Maui.Controls
 			var transforms = ((string)newValue).Split(' ');
 			foreach (var transform in transforms)
 			{
-				if (string.IsNullOrEmpty(transform) || transform.IndexOf("(", StringComparison.Ordinal) < 0 || transform.IndexOf(")", StringComparison.Ordinal) < 0)
+				var openBracket = transform.IndexOf("(", StringComparison.Ordinal);
+				var closeBracket = transform.IndexOf(")", StringComparison.Ordinal);
+				if (string.IsNullOrEmpty(transform) || openBracket < 0 || closeBracket < 0)
 					throw new FormatException("Format for transform is 'none | transform(value) [transform(value) ]*'");
-				var transformName = transform.Substring(0, transform.IndexOf("(", StringComparison.Ordinal));
-				var value = transform.Substring(transform.IndexOf("(", StringComparison.Ordinal) + 1, transform.IndexOf(")", StringComparison.Ordinal) - transform.IndexOf("(", StringComparison.Ordinal) - 1);
+				var transformName = transform.Substring(0, openBracket);
+				var value = transform.Substring(openBracket + 1, closeBracket - openBracket - 1);
 				double translationX, translationY, scaleX, scaleY, rotateX, rotateY, rotate;
 				if (transformName.StartsWith("translateX", StringComparison.OrdinalIgnoreCase) && double.TryParse(value, out translationX))
 					bindable.SetValue(TranslationXProperty, translationX);
@@ -243,38 +276,84 @@ namespace Microsoft.Maui.Controls
 					(bindable as VisualElement)?.NotifyBackgroundChanges();
 			});
 
+		WeakBackgroundChangedProxy _backgroundProxy = null;
+		WeakClipChangedProxy _clipProxy = null;
+
+		~VisualElement()
+		{
+			_clipProxy?.Unsubscribe();
+			_backgroundProxy?.Unsubscribe();
+		}
+
 		void NotifyBackgroundChanges()
 		{
-			if (Background != null)
-			{
-				Background.Parent = this;
-				Background.PropertyChanged += OnBackgroundChanged;
+			var background = Background;
+			if (background is ImmutableBrush)
+				return;
 
-				if (Background is GradientBrush gradientBrush)
-					gradientBrush.InvalidateGradientBrushRequested += InvalidateGradientBrushRequested;
+			if (background != null)
+			{
+				SetInheritedBindingContext(background, BindingContext);
+				var proxy = _backgroundProxy ??= new();
+				proxy.Subscribe(background, (sender, e) => OnPropertyChanged(nameof(Background)));
 			}
 		}
 
 		void StopNotifyingBackgroundChanges()
 		{
-			if (Background != null)
-			{
-				Background.Parent = null;
-				Background.PropertyChanged -= OnBackgroundChanged;
+			var background = Background;
+			if (background is ImmutableBrush)
+				return;
 
-				if (Background is GradientBrush gradientBrush)
-					gradientBrush.InvalidateGradientBrushRequested -= InvalidateGradientBrushRequested;
+			if (background != null)
+			{
+				SetInheritedBindingContext(background, null);
+				_backgroundProxy?.Unsubscribe();
 			}
 		}
 
-		void OnBackgroundChanged(object sender, PropertyChangedEventArgs e)
+		class WeakBackgroundChangedProxy : WeakEventProxy<Brush, EventHandler>
 		{
-			OnPropertyChanged(nameof(Background));
-		}
+			void OnBackgroundChanged(object sender, EventArgs e)
+			{
+				if (TryGetHandler(out var handler))
+				{
+					handler(sender, e);
+				}
+				else
+				{
+					Unsubscribe();
+				}
+			}
 
-		void InvalidateGradientBrushRequested(object sender, EventArgs e)
-		{
-			OnPropertyChanged(nameof(Background));
+			public override void Subscribe(Brush source, EventHandler handler)
+			{
+				if (TryGetSource(out var s))
+				{
+					s.PropertyChanged -= OnBackgroundChanged;
+
+					if (s is GradientBrush g)
+						g.InvalidateGradientBrushRequested -= OnBackgroundChanged;
+				}
+
+				source.PropertyChanged += OnBackgroundChanged;
+				if (source is GradientBrush gradientBrush)
+					gradientBrush.InvalidateGradientBrushRequested += OnBackgroundChanged;
+
+				base.Subscribe(source, handler);
+			}
+
+			public override void Unsubscribe()
+			{
+				if (TryGetSource(out var s))
+				{
+					s.PropertyChanged -= OnBackgroundChanged;
+
+					if (s is GradientBrush g)
+						g.InvalidateGradientBrushRequested -= OnBackgroundChanged;
+				}
+				base.Unsubscribe();
+			}
 		}
 
 		internal static readonly BindablePropertyKey BehaviorsPropertyKey = BindableProperty.CreateReadOnly("Behaviors", typeof(IList<Behavior>), typeof(VisualElement), default(IList<Behavior>),
@@ -472,6 +551,30 @@ namespace Microsoft.Maui.Controls
 		{
 			get { return (bool)GetValue(IsEnabledProperty); }
 			set { SetValue(IsEnabledProperty, value); }
+		}
+
+		/// <summary>
+		/// This value represents the cumulative IsEnabled value.
+		/// All types that override this property need to also invoke
+		/// the RefreshIsEnabledProperty() method if the value will change.
+		/// </summary>
+		protected virtual bool IsEnabledCore
+		{
+			get
+			{
+				if (_isEnabledExplicit == false)
+				{
+					// If the explicitly set value is false, then nothing else matters
+					// And we can save the effort of a Parent check
+					return false;
+				}
+
+				var parent = Parent as VisualElement;
+				if (parent is not null && !parent.IsEnabled)
+					return false;
+
+				return _isEnabledExplicit;
+			}
 		}
 
 		/// <include file="../../docs/Microsoft.Maui.Controls/VisualElement.xml" path="//Member[@MemberName='IsFocused']/Docs/*" />
@@ -1153,6 +1256,16 @@ namespace Microsoft.Maui.Controls
 			(bindable as IPropertyPropagationController)?.PropagatePropertyChanged(VisualElement.FlowDirectionProperty.PropertyName);
 		}
 
+		static object CoerceIsEnabledProperty(BindableObject bindable, object value)
+		{
+			if (bindable is VisualElement visualElement)
+			{
+				visualElement._isEnabledExplicit = (bool)value;
+				return visualElement.IsEnabledCore;
+			}
+
+			return false;
+		}
 
 		static void OnIsEnabledPropertyChanged(BindableObject bindable, object oldValue, object newValue)
 		{
@@ -1162,6 +1275,8 @@ namespace Microsoft.Maui.Controls
 				return;
 
 			element.ChangeVisualState();
+
+			(bindable as IPropertyPropagationController)?.PropagatePropertyChanged(VisualElement.IsEnabledProperty.PropertyName);
 		}
 
 		static void OnIsFocusedPropertyChanged(BindableObject bindable, object oldvalue, object newvalue)
@@ -1220,8 +1335,18 @@ namespace Microsoft.Maui.Controls
 
 		void IPropertyPropagationController.PropagatePropertyChanged(string propertyName)
 		{
+			if (propertyName == null || propertyName == IsEnabledProperty.PropertyName)
+				this.RefreshPropertyValue(IsEnabledProperty, _isEnabledExplicit);
+
 			PropertyPropagationExtensions.PropagatePropertyChanged(propertyName, this, ((IVisualTreeElement)this).GetVisualChildren());
 		}
+
+		/// <summary>
+		/// This method must always be called if some event occurs and the value of
+		/// the IsEnabledCore property will change.
+		/// </summary>
+		protected void RefreshIsEnabledProperty() =>
+			this.RefreshPropertyValue(IsEnabledProperty, _isEnabledExplicit);
 
 		void UpdateBoundsComponents(Rect bounds)
 		{
